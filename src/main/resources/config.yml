@@ -1,4 +1,4 @@
-# SimpMC-Notice 的三个内容库。
+# SimpMC-Notice 的三个内容库、自动公告与玩家加入消息。
 # 所有文本都支持传统 & 颜色、&#RRGGBB、&x&R&R&G&G&B&B、MiniMessage 和 \\n 换行。
 
 # 1. 随机前缀库：供自动公告和 /noti 使用。
@@ -18,6 +18,20 @@ fixed-prefixes:
   - "&c[重要通知]"
   - "&#FF8800[活动通知]"
 
+# 玩家加入消息只发送给刚加入的玩家。
+join:
+  # 每名玩家每次加入时都会收到。留空或只填写空白字符时不发送。
+  message: ""
+
+  # 定向消息的时间从本次插件启用时起算，/noticereload 不会重置计时。
+  # 玩家名忽略大小写；消息留空时该规则匹配后也不会发送。
+  targeted: []
+  # 示例：
+  # targeted:
+  #   - player: "Minecraft0122"
+  #     within-seconds: 300
+  #     message: "&e欢迎回来！\\n&7你在插件启用后五分钟内进入了服务器。"
+
 # 自动公告设置。
 announcement:
   enabled: true
@@ -36,5 +50,5 @@ messages:
   empty-random-prefixes: "&c随机前缀库为空。"
   empty-random-messages: "&c随机消息库为空。"
   empty-fixed-prefixes: "&c固定前缀库为空。"
-  reload-success: "&aSimpMC-Notice 配置和三个内容库已重载。"
+  reload-success: "&aSimpMC-Notice 配置、内容库和加入消息已重载。"
   reload-failure: "&c配置重载失败，请检查控制台。"

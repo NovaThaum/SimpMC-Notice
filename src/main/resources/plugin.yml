@@ -17,7 +17,7 @@ commands:
     permission: simpmc.notice.notice
   noticereload:
     aliases: [noticrreload]
-    description: 重载 SimpMC-Notice 配置和三个内容库
+    description: 重载 SimpMC-Notice 配置、内容库、玩家加入消息和公告时间范围
     usage: /noticereload
     permission: simpmc.notice.reload
 

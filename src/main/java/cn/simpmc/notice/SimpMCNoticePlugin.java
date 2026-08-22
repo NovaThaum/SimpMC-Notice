@@ -1,9 +1,12 @@
 package cn.simpmc.notice;
 
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.random.RandomGenerator;
@@ -13,14 +16,19 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import net.kyori.adventure.text.minimessage.tag.standard.StandardTags;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabExecutor;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
-public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor {
+public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor, Listener {
 
     private static final long MAX_INTERVAL_SECONDS = 31_536_000L;
     private static final TagResolver FORMATTING_TAGS = TagResolver.resolver(
@@ -36,6 +44,8 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
             StandardTags.newline());
     private static final MiniMessage MINI_MESSAGE =
             MiniMessage.builder().tags(FORMATTING_TAGS).build();
+    private static final PlainTextComponentSerializer PLAIN_TEXT_SERIALIZER =
+            PlainTextComponentSerializer.plainText();
     private static final Pattern BUNGEE_HEX =
             Pattern.compile("(?i)&x(?:&[0-9a-f]){6}");
     private static final Pattern AMPERSAND_HEX =
@@ -48,8 +58,16 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
     private final AtomicLong scheduleGeneration = new AtomicLong();
     private volatile PluginSettings settings;
     private volatile ScheduledTask announcementTask;
+    private volatile long joinWindowStartNanos;
 
     record Interval(long minimumSeconds, long maximumSeconds) {}
+
+    record TimedJoinMessage(String playerName, long withinSeconds, String message) {
+        TimedJoinMessage {
+            playerName = playerName == null ? "" : playerName.trim();
+            message = message == null ? "" : message;
+        }
+    }
 
     record PluginSettings(
             List<String> randomPrefixes,
@@ -58,6 +76,8 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
             boolean announcementsEnabled,
             Interval interval,
             String separator,
+            String joinMessage,
+            List<TimedJoinMessage> timedJoinMessages,
             String notiUsage,
             String noticeUsage,
             String emptyRandomPrefixes,
@@ -70,9 +90,11 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
     public void onEnable() {
         saveDefaultConfig();
         settings = loadSettings();
+        joinWindowStartNanos = System.nanoTime();
         registerCommand("noti");
         registerCommand("notice");
         registerCommand("noticereload");
+        getServer().getPluginManager().registerEvents(this, this);
         logPoolWarnings(settings);
         restartAnnouncementSchedule();
     }
@@ -163,6 +185,39 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
         return List.of();
     }
 
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        PluginSettings current = settings;
+        if (current == null) {
+            return;
+        }
+
+        Player player = event.getPlayer();
+        sendMessageIfPresent(player, current.joinMessage(), "join.message");
+
+        long elapsedNanos = elapsedNanosSince(joinWindowStartNanos, System.nanoTime());
+        if (elapsedNanos < 0L) {
+            return;
+        }
+        for (TimedJoinMessage notice : current.timedJoinMessages()) {
+            if (matchesTimedJoin(notice, player.getName(), elapsedNanos)) {
+                sendMessageIfPresent(
+                        player,
+                        notice.message(),
+                        "join.targeted[" + notice.playerName() + "]");
+            }
+        }
+    }
+
+    private void sendMessageIfPresent(Player player, String message, String settingPath) {
+        try {
+            parseMessageIfPresent(message).ifPresent(player::sendMessage);
+        } catch (RuntimeException exception) {
+            getLogger().warning(
+                    "无法发送 " + settingPath + " 消息，已跳过：" + exception.getMessage());
+        }
+    }
+
     private PluginSettings loadSettings() {
         return new PluginSettings(
                 List.copyOf(getConfig().getStringList("random-prefixes")),
@@ -173,6 +228,8 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
                         getConfig().getLong("announcement.interval-seconds.min", 300L),
                         getConfig().getLong("announcement.interval-seconds.max", 600L)),
                 getConfig().getString("separator", " "),
+                readJoinMessage(),
+                readTimedJoinMessages(),
                 getConfig().getString("messages.noti-usage", "&c用法: /noti <内容>"),
                 getConfig().getString("messages.notice-usage", "&c用法: /notice <内容>"),
                 getConfig().getString(
@@ -185,6 +242,98 @@ public final class SimpMCNoticePlugin extends JavaPlugin implements TabExecutor 
                         "messages.reload-success", "&aSimpMC-Notice 配置和内容库已重载。"),
                 getConfig().getString(
                         "messages.reload-failure", "&c配置重载失败，请检查控制台。"));
+    }
+
+    private String readJoinMessage() {
+        String message = getConfig().getString("join.message", "");
+        return message == null ? "" : message;
+    }
+
+    private List<TimedJoinMessage> readTimedJoinMessages() {
+        List<TimedJoinMessage> notices = new ArrayList<>();
+        List<Map<?, ?>> entries = getConfig().getMapList("join.targeted");
+        int index = 0;
+        for (Map<?, ?> entry : entries) {
+            index++;
+            String playerName = stringValue(entry.get("player"));
+            String message = stringValue(entry.get("message"));
+            long withinSeconds = longValue(entry.get("within-seconds"), -1L);
+            addTimedJoinMessage(notices, playerName, withinSeconds, message, index);
+        }
+        return List.copyOf(notices);
+    }
+
+    private void addTimedJoinMessage(
+            List<TimedJoinMessage> destination,
+            String playerName,
+            long withinSeconds,
+            String message,
+            int index) {
+        String path = "join.targeted[" + index + "]";
+        if (isBlankMessage(playerName)) {
+            getLogger().warning(path + " 缺少玩家名，已跳过。");
+            return;
+        }
+        if (withinSeconds < 0L) {
+            getLogger().warning(path + " 的 within-seconds 无效，已跳过。");
+            return;
+        }
+        destination.add(new TimedJoinMessage(playerName, withinSeconds, message));
+    }
+
+    private static String stringValue(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static long longValue(Object value, long defaultValue) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value != null) {
+            try {
+                return Long.parseLong(String.valueOf(value).trim());
+            } catch (NumberFormatException ignored) {
+                // The caller logs and skips invalid values.
+            }
+        }
+        return defaultValue;
+    }
+
+    static boolean isBlankMessage(String message) {
+        return message == null || expandEscapedNewlines(message).isBlank();
+    }
+
+    static Optional<Component> parseMessageIfPresent(String message) {
+        if (isBlankMessage(message)) {
+            return Optional.empty();
+        }
+        Component formatted = parseFormattedText(message);
+        return PLAIN_TEXT_SERIALIZER.serialize(formatted).isBlank()
+                ? Optional.empty()
+                : Optional.of(formatted);
+    }
+
+    static long elapsedNanosSince(long startNanos, long nowNanos) {
+        long elapsed = nowNanos - startNanos;
+        return elapsed < 0L ? -1L : elapsed;
+    }
+
+    static boolean isWithinJoinWindow(long elapsedNanos, long withinSeconds) {
+        if (elapsedNanos < 0L || withinSeconds < 0L) {
+            return false;
+        }
+        long maximumNanos = withinSeconds > Long.MAX_VALUE / 1_000_000_000L
+                ? Long.MAX_VALUE
+                : withinSeconds * 1_000_000_000L;
+        return elapsedNanos <= maximumNanos;
+    }
+
+    static boolean matchesTimedJoin(
+            TimedJoinMessage notice, String playerName, long elapsedNanos) {
+        return notice != null
+                && playerName != null
+                && notice.playerName().equalsIgnoreCase(playerName)
+                && isWithinJoinWindow(elapsedNanos, notice.withinSeconds());
     }
 
     static Interval normalizeInterval(long first, long second) {

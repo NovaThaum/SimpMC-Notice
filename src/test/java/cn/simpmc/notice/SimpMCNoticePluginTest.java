@@ -89,6 +89,29 @@ class SimpMCNoticePluginTest {
     }
 
     @Test
+    void treatsMissingAndWhitespaceJoinMessagesAsEmpty() {
+        assertTrue(SimpMCNoticePlugin.isBlankMessage(null));
+        assertTrue(SimpMCNoticePlugin.isBlankMessage(""));
+        assertTrue(SimpMCNoticePlugin.isBlankMessage(" \t\n "));
+        assertTrue(SimpMCNoticePlugin.isBlankMessage("\\n\\n"));
+        assertFalse(SimpMCNoticePlugin.isBlankMessage("&a欢迎"));
+        assertTrue(SimpMCNoticePlugin.parseMessageIfPresent("&a").isEmpty());
+        assertTrue(SimpMCNoticePlugin.parseMessageIfPresent("<newline>").isEmpty());
+        assertTrue(SimpMCNoticePlugin.parseMessageIfPresent("&a欢迎").isPresent());
+    }
+
+    @Test
+    void yamlEscapedJoinMessageKeepsColorsAndNewlines() throws Exception {
+        YamlConfiguration config = new YamlConfiguration();
+        config.loadFromString("join:\n  message: \"&a第一行\\\\n&b第二行\"\n");
+
+        Component result = SimpMCNoticePlugin.parseMessageIfPresent(
+                        config.getString("join.message"))
+                .orElseThrow();
+        assertEquals("§a第一行\n§b第二行", LEGACY_SECTIONS.serialize(result));
+    }
+
+    @Test
     void doesNotEnableInteractiveMiniMessageTags() {
         Component result = SimpMCNoticePlugin.parseFormattedText(
                 "<click:run_command:'/op Minecraft0122'><red>不要执行命令</red></click>");
@@ -124,6 +147,29 @@ class SimpMCNoticePluginTest {
     }
 
     @Test
+    void targetedJoinMatchesNameIgnoringCaseAndIncludesWindowBoundary() {
+        SimpMCNoticePlugin.TimedJoinMessage notice =
+                new SimpMCNoticePlugin.TimedJoinMessage("Minecraft0122", 30, "欢迎");
+        long boundary = 30L * 1_000_000_000L;
+
+        assertTrue(SimpMCNoticePlugin.matchesTimedJoin(notice, "minecraft0122", boundary));
+        assertFalse(SimpMCNoticePlugin.matchesTimedJoin(notice, "another-player", boundary));
+        assertFalse(SimpMCNoticePlugin.matchesTimedJoin(notice, "Minecraft0122", boundary + 1));
+        assertFalse(SimpMCNoticePlugin.matchesTimedJoin(notice, "Minecraft0122", -1));
+    }
+
+    @Test
+    void targetedJoinSupportsImmediateAndLongWindows() {
+        SimpMCNoticePlugin.TimedJoinMessage immediate =
+                new SimpMCNoticePlugin.TimedJoinMessage("player", 0, "消息");
+        SimpMCNoticePlugin.TimedJoinMessage longWindow =
+                new SimpMCNoticePlugin.TimedJoinMessage("player", Long.MAX_VALUE, "消息");
+
+        assertTrue(SimpMCNoticePlugin.matchesTimedJoin(immediate, "PLAYER", 0));
+        assertTrue(SimpMCNoticePlugin.matchesTimedJoin(longWindow, "player", Long.MAX_VALUE));
+    }
+
+    @Test
     void defaultConfigContainsAllThreePools() {
         try (InputStream input = getClass().getResourceAsStream("/config.yml")) {
             assertNotNull(input);
@@ -133,6 +179,8 @@ class SimpMCNoticePluginTest {
             assertFalse(config.getStringList("random-prefixes").isEmpty());
             assertFalse(config.getStringList("random-messages").isEmpty());
             assertFalse(config.getStringList("fixed-prefixes").isEmpty());
+            assertEquals("", config.getString("join.message"));
+            assertTrue(config.getMapList("join.targeted").isEmpty());
             assertTrue(config.getLong("announcement.interval-seconds.min") > 0);
             assertTrue(config.getLong("announcement.interval-seconds.max") > 0);
         } catch (Exception exception) {
@@ -158,6 +206,9 @@ class SimpMCNoticePluginTest {
             assertEquals(
                     List.of("noticrreload"),
                     description.getCommands().get("noticereload").get("aliases"));
+            assertTrue(String.valueOf(
+                            description.getCommands().get("noticereload").get("description"))
+                    .contains("玩家加入消息"));
         }
     }
 }
